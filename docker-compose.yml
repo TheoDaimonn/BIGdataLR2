@@ -1,0 +1,79 @@
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: petstore_dw
+    environment:
+      POSTGRES_USER: lab
+      POSTGRES_PASSWORD: lab123
+      POSTGRES_DB: petstore_analytics
+    ports:
+      - "5432:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+      - ./sql:/docker-entrypoint-initdb.d
+      - ./data:/import_data
+    command: >
+      postgres 
+      -c log_min_messages=WARNING 
+      -c log_min_error_statement=ERROR
+      -c client_min_messages=WARNING
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lab -d petstore_analytics"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - spark_net
+
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:24-alpine
+    container_name: spark_clickhouse
+    environment:
+      CLICKHOUSE_DB: analytics
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_PASSWORD: ""
+    ports:
+      - "8123:8123"
+      - "9000:9000"
+    volumes:
+      - ch_data:/var/lib/clickhouse
+    networks:
+      - spark_net
+    healthcheck:
+      test: ["CMD", "clickhouse-client", "--query", "SELECT 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+
+  spark:
+    image: apache/spark:3.4.1
+    container_name: spark_etl
+    user: root
+    depends_on:
+      postgres:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+    networks:
+      - spark_net
+    volumes:
+      - ./spark_job:/app
+    environment:
+      PYSPARK_PYTHON: python3
+      PYSPARK_DRIVER_PYTHON: python3
+    command: >
+      bash -c "pip install clickhouse-connect==0.6.23 psycopg2-binary &&
+      /opt/spark/bin/spark-submit --conf spark.driver.extraJavaOptions='-Dlog4j.logger.org.apache.spark=ERROR -Dlog4j.logger.org.spark_project=ERROR -Dlog4j.logger.org.apache.hadoop=ERROR' 
+      --conf spark.executor.extraJavaOptions='-Dlog4j.logger.org.apache.spark=ERROR -Dlog4j.logger.org.spark_project=ERROR -Dlog4j.logger.org.apache.hadoop=ERROR'
+      --packages org.postgresql:postgresql:42.6.0,com.clickhouse:clickhouse-jdbc:0.4.6
+      /app/main.py"
+
+volumes:
+  pg_data:
+  ch_data:
+
+networks:
+  spark_net:
+    driver: bridge
