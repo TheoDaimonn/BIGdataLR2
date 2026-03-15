@@ -10,7 +10,6 @@ services:
       - "5432:5432"
     volumes:
       - pg_data:/var/lib/postgresql/data
-      - ./sql:/docker-entrypoint-initdb.d
       - ./data:/import_data
     command: >
       postgres 
@@ -60,6 +59,7 @@ services:
       - spark_net
     volumes:
       - ./spark_job:/app
+      - ./data:/import_data:ro
     environment:
       PYSPARK_PYTHON: python3
       PYSPARK_DRIVER_PYTHON: python3

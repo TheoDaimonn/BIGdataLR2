@@ -1,10 +1,18 @@
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import *
 from pyspark.sql.types import *
-import psycopg2
+
+jdbc_url = "jdbc:postgresql://postgres:5432/petstore_analytics"
+jdbc_props = {
+    "user": "lab",
+    "password": "lab123",
+    "driver": "org.postgresql.Driver",
+}
 
 
 def get_postgres_connection():
+    import psycopg2
+
     return psycopg2.connect(
         host="postgres",
         port=5432,
@@ -14,26 +22,264 @@ def get_postgres_connection():
     )
 
 
-def create_star_schema_tables():
+def create_tables(spark):
     conn = get_postgres_connection()
     cursor = conn.cursor()
 
-    cursor.execute("DELETE FROM fact_sales")
-    cursor.execute("DELETE FROM dim_date")
-    cursor.execute("DELETE FROM dim_supplier")
-    cursor.execute("DELETE FROM dim_store")
-    cursor.execute("DELETE FROM dim_product")
-    cursor.execute("DELETE FROM dim_product_brand")
-    cursor.execute("DELETE FROM dim_product_category")
-    cursor.execute("DELETE FROM dim_seller")
-    cursor.execute("DELETE FROM dim_customer")
-    cursor.execute("DELETE FROM dim_pet")
-    cursor.execute("DELETE FROM dim_pet_category")
-    cursor.execute("DELETE FROM dim_country")
+    cursor.execute("DROP TABLE IF EXISTS fact_sales")
+    cursor.execute("DROP TABLE IF EXISTS dim_date")
+    cursor.execute("DROP TABLE IF EXISTS dim_supplier")
+    cursor.execute("DROP TABLE IF EXISTS dim_store")
+    cursor.execute("DROP TABLE IF EXISTS dim_product")
+    cursor.execute("DROP TABLE IF EXISTS dim_product_brand")
+    cursor.execute("DROP TABLE IF EXISTS dim_product_category")
+    cursor.execute("DROP TABLE IF EXISTS dim_seller")
+    cursor.execute("DROP TABLE IF EXISTS dim_customer")
+    cursor.execute("DROP TABLE IF EXISTS dim_pet")
+    cursor.execute("DROP TABLE IF EXISTS dim_pet_category")
+    cursor.execute("DROP TABLE IF EXISTS dim_country")
+    cursor.execute("DROP TABLE IF EXISTS mock_data")
+
+    cursor.execute("""
+        CREATE TABLE dim_country (
+            country_key SERIAL PRIMARY KEY,
+            country_name VARCHAR(100) UNIQUE NOT NULL
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE dim_pet_category (
+            pet_category_key SERIAL PRIMARY KEY,
+            category_name VARCHAR(50) UNIQUE NOT NULL
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE dim_pet (
+            pet_key SERIAL PRIMARY KEY,
+            pet_type VARCHAR(50),
+            pet_name VARCHAR(100),
+            breed VARCHAR(100),
+            pet_category_key INTEGER REFERENCES dim_pet_category(pet_category_key),
+            UNIQUE(pet_type, pet_name, breed)
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE dim_customer (
+            customer_key SERIAL PRIMARY KEY,
+            source_id INTEGER UNIQUE,
+            first_name VARCHAR(100),
+            last_name VARCHAR(100),
+            age INTEGER,
+            email VARCHAR(255),
+            postal_code VARCHAR(20),
+            country_key INTEGER REFERENCES dim_country(country_key),
+            pet_key INTEGER REFERENCES dim_pet(pet_key)
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE dim_seller (
+            seller_key SERIAL PRIMARY KEY,
+            source_id INTEGER UNIQUE,
+            first_name VARCHAR(100),
+            last_name VARCHAR(100),
+            email VARCHAR(255),
+            postal_code VARCHAR(20),
+            country_key INTEGER REFERENCES dim_country(country_key)
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE dim_product_category (
+            category_key SERIAL PRIMARY KEY,
+            category_name VARCHAR(100) UNIQUE NOT NULL
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE dim_product_brand (
+            brand_key SERIAL PRIMARY KEY,
+            brand_name VARCHAR(100) UNIQUE NOT NULL
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE dim_product (
+            product_key SERIAL PRIMARY KEY,
+            source_id INTEGER UNIQUE,
+            product_name VARCHAR(255),
+            category_key INTEGER REFERENCES dim_product_category(category_key),
+            brand_key INTEGER REFERENCES dim_product_brand(brand_key),
+            price NUMERIC(10,2),
+            weight NUMERIC(8,2),
+            color VARCHAR(50),
+            size VARCHAR(20),
+            material VARCHAR(100),
+            description TEXT,
+            rating NUMERIC(3,2),
+            reviews INTEGER,
+            release_date VARCHAR(50),
+            expiry_date VARCHAR(50)
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE dim_store (
+            store_key SERIAL PRIMARY KEY,
+            store_name VARCHAR(255) UNIQUE NOT NULL,
+            location VARCHAR(255),
+            city VARCHAR(100),
+            state VARCHAR(100),
+            country_key INTEGER REFERENCES dim_country(country_key),
+            phone VARCHAR(50),
+            email VARCHAR(255)
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE dim_supplier (
+            supplier_key SERIAL PRIMARY KEY,
+            supplier_name VARCHAR(255) UNIQUE NOT NULL,
+            contact VARCHAR(255),
+            email VARCHAR(255),
+            phone VARCHAR(50),
+            address TEXT,
+            city VARCHAR(100),
+            country_key INTEGER REFERENCES dim_country(country_key)
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE dim_date (
+            date_key INTEGER PRIMARY KEY,
+            full_date VARCHAR(50) NOT NULL,
+            day INTEGER,
+            month INTEGER,
+            year INTEGER,
+            quarter INTEGER,
+            day_of_week INTEGER,
+            day_name VARCHAR(20),
+            month_name VARCHAR(20),
+            is_weekend BOOLEAN
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE fact_sales (
+            sale_key BIGSERIAL PRIMARY KEY,
+            source_id INTEGER,
+            date_key INTEGER REFERENCES dim_date(date_key),
+            customer_key INTEGER REFERENCES dim_customer(customer_key),
+            seller_key INTEGER REFERENCES dim_seller(seller_key),
+            product_key INTEGER REFERENCES dim_product(product_key),
+            store_key INTEGER REFERENCES dim_store(store_key),
+            supplier_key INTEGER REFERENCES dim_supplier(supplier_key),
+            quantity INTEGER NOT NULL,
+            unit_price NUMERIC(10,2),
+            total_price NUMERIC(12,2),
+            sale_date_original VARCHAR(50)
+        )
+    """)
 
     conn.commit()
     cursor.close()
     conn.close()
+    print("Tables created!")
+
+
+def load_mock_data(spark):
+    print("Loading CSV data with Spark...")
+
+    schema = StructType(
+        [
+            StructField("id", IntegerType(), True),
+            StructField("customer_first_name", StringType(), True),
+            StructField("customer_last_name", StringType(), True),
+            StructField("customer_age", IntegerType(), True),
+            StructField("customer_email", StringType(), True),
+            StructField("customer_country", StringType(), True),
+            StructField("customer_postal_code", StringType(), True),
+            StructField("customer_pet_type", StringType(), True),
+            StructField("customer_pet_name", StringType(), True),
+            StructField("customer_pet_breed", StringType(), True),
+            StructField("seller_first_name", StringType(), True),
+            StructField("seller_last_name", StringType(), True),
+            StructField("seller_email", StringType(), True),
+            StructField("seller_country", StringType(), True),
+            StructField("seller_postal_code", StringType(), True),
+            StructField("product_name", StringType(), True),
+            StructField("product_category", StringType(), True),
+            StructField("product_price", FloatType(), True),
+            StructField("product_quantity", IntegerType(), True),
+            StructField("sale_date", StringType(), True),
+            StructField("sale_customer_id", IntegerType(), True),
+            StructField("sale_seller_id", IntegerType(), True),
+            StructField("sale_product_id", IntegerType(), True),
+            StructField("sale_quantity", IntegerType(), True),
+            StructField("sale_total_price", FloatType(), True),
+            StructField("store_name", StringType(), True),
+            StructField("store_location", StringType(), True),
+            StructField("store_city", StringType(), True),
+            StructField("store_state", StringType(), True),
+            StructField("store_country", StringType(), True),
+            StructField("store_phone", StringType(), True),
+            StructField("store_email", StringType(), True),
+            StructField("pet_category", StringType(), True),
+            StructField("product_weight", FloatType(), True),
+            StructField("product_color", StringType(), True),
+            StructField("product_size", StringType(), True),
+            StructField("product_brand", StringType(), True),
+            StructField("product_material", StringType(), True),
+            StructField("product_description", StringType(), True),
+            StructField("product_rating", FloatType(), True),
+            StructField("product_reviews", IntegerType(), True),
+            StructField("product_release_date", StringType(), True),
+            StructField("product_expiry_date", StringType(), True),
+            StructField("supplier_name", StringType(), True),
+            StructField("supplier_contact", StringType(), True),
+            StructField("supplier_email", StringType(), True),
+            StructField("supplier_phone", StringType(), True),
+            StructField("supplier_address", StringType(), True),
+            StructField("supplier_city", StringType(), True),
+            StructField("supplier_country", StringType(), True),
+        ]
+    )
+
+    df_list = []
+    for i in range(1, 11):
+        csv_path = f"/import_data/MOCK_DATA_{i}.csv"
+        try:
+            df = spark.read.csv(csv_path, header=True, schema=schema, nullValue="")
+            df_list.append(df)
+            print(f"Loaded {csv_path}")
+        except Exception as e:
+            print(f"Error loading {csv_path}: {e}")
+
+    if df_list:
+        combined_df = df_list[0]
+        for df in df_list[1:]:
+            combined_df = combined_df.union(df)
+
+        combined_df = combined_df.filter(
+            col("id").isNotNull()
+            & (col("id") != 0)
+            & (col("customer_first_name") != "customer_first_name")
+        )
+
+        print(f"Total rows: {combined_df.count()}")
+
+        combined_df.write.jdbc(
+            url=jdbc_url,
+            table="mock_data",
+            mode="overwrite",
+            properties=jdbc_props,
+        )
+        print("Mock data loaded to PostgreSQL via Spark!")
+    else:
+        print("No CSV files found")
+
+
+def write_df_to_postgres(df, table_name, mode="overwrite"):
+    if df is None or df.head(1) == []:
+        print(f"Warning: No data to write to {table_name}")
+        return
+    df.write.jdbc(
+        url=jdbc_url,
+        table=table_name,
+        mode=mode,
+        properties=jdbc_props,
+    )
 
 
 def insert_dim_country(spark, df):
@@ -45,564 +291,707 @@ def insert_dim_country(spark, df):
         .union(df.select("supplier_country").distinct())
         .withColumnRenamed("customer_country", "country_name")
         .na.drop(subset=["country_name"])
+    ).distinct()
+
+    write_df_to_postgres(countries, "dim_country", mode="append")
+
+    country_df = (
+        spark.read.format("jdbc")
+        .option("url", jdbc_url)
+        .option("dbtable", "dim_country")
+        .option("user", "lab")
+        .option("password", "lab123")
+        .option("driver", "org.postgresql.Driver")
+        .load()
     )
 
-    countries = countries.distinct().collect()
-
-    conn = get_postgres_connection()
-    cursor = conn.cursor()
-
-    country_map = {}
-    for row in countries:
-        country_name = row.country_name
-        if country_name:
-            cursor.execute(
-                "INSERT INTO dim_country (country_name) VALUES (%s) ON CONFLICT (country_name) DO NOTHING RETURNING country_key, country_name",
-                (country_name,),
-            )
-            result = cursor.fetchone()
-            if result:
-                country_map[country_name] = result[0]
-
-    conn.commit()
-    cursor.close()
-    conn.close()
+    country_map = {
+        row.country_name: row.country_key
+        for row in country_df.select("country_name", "country_key").collect()
+    }
     return country_map
 
 
 def insert_dim_pet_category(spark, df):
     pet_categories = (
-        df.select("pet_category").distinct().na.drop(subset=["pet_category"])
+        (df.select("pet_category").distinct().na.drop(subset=["pet_category"]))
+        .distinct()
+        .withColumnRenamed("pet_category", "category_name")
     )
-    pet_categories = pet_categories.distinct().collect()
 
-    conn = get_postgres_connection()
-    cursor = conn.cursor()
+    write_df_to_postgres(pet_categories, "dim_pet_category", mode="append")
 
-    pet_cat_map = {}
-    for row in pet_categories:
-        category_name = row.pet_category
-        if category_name:
-            cursor.execute(
-                "INSERT INTO dim_pet_category (category_name) VALUES (%s) ON CONFLICT (category_name) DO NOTHING RETURNING pet_category_key, category_name",
-                (category_name,),
-            )
-            result = cursor.fetchone()
-            if result:
-                pet_cat_map[category_name] = result[0]
+    pet_cat_df = (
+        spark.read.format("jdbc")
+        .option("url", jdbc_url)
+        .option("dbtable", "dim_pet_category")
+        .option("user", "lab")
+        .option("password", "lab123")
+        .option("driver", "org.postgresql.Driver")
+        .load()
+    )
 
-    conn.commit()
-    cursor.close()
-    conn.close()
+    pet_cat_map = {
+        row.category_name: row.pet_category_key
+        for row in pet_cat_df.select("category_name", "pet_category_key").collect()
+    }
     return pet_cat_map
 
 
 def insert_dim_pet(spark, df, pet_cat_map):
-    pets = df.select(
-        "customer_pet_type", "customer_pet_name", "customer_pet_breed", "pet_category"
-    ).distinct()
-    pets = pets.na.drop(subset=["customer_pet_type"])
-    pets = pets.collect()
-
-    conn = get_postgres_connection()
-    cursor = conn.cursor()
-
-    pet_map = {}
-    for row in pets:
-        pet_type = row.customer_pet_type
-        pet_name = row.customer_pet_name
-        breed = row.customer_pet_breed
-        pet_category = row.pet_category
-
-        pet_category_key = pet_cat_map.get(pet_category) if pet_category else None
-
-        cursor.execute(
-            "INSERT INTO dim_pet (pet_type, pet_name, breed, pet_category_key) VALUES (%s, %s, %s, %s) ON CONFLICT (pet_type, pet_name, breed) DO NOTHING RETURNING pet_key, pet_type, pet_name, breed",
-            (pet_type, pet_name, breed, pet_category_key),
+    pets = (
+        df.select(
+            "customer_pet_type",
+            "customer_pet_name",
+            "customer_pet_breed",
+            "pet_category",
         )
-        result = cursor.fetchone()
-        if result:
-            key = (pet_type, pet_name, breed)
-            pet_map[key] = result[0]
+        .groupBy("customer_pet_type", "customer_pet_name", "customer_pet_breed")
+        .agg(
+            first("pet_category").alias("pet_category"),
+        )
+        .na.drop(subset=["customer_pet_type"])
+    )
 
-    conn.commit()
-    cursor.close()
-    conn.close()
+    pets_df = pets.select(
+        "customer_pet_type",
+        "customer_pet_name",
+        "customer_pet_breed",
+    )
+
+    write_df_to_postgres(
+        pets_df.withColumnRenamed("customer_pet_type", "pet_type")
+        .withColumnRenamed("customer_pet_name", "pet_name")
+        .withColumnRenamed("customer_pet_breed", "breed"),
+        "dim_pet",
+        mode="append",
+    )
+
+    pet_df = (
+        spark.read.format("jdbc")
+        .option("url", jdbc_url)
+        .option("dbtable", "dim_pet")
+        .option("user", "lab")
+        .option("password", "lab123")
+        .option("driver", "org.postgresql.Driver")
+        .load()
+    )
+
+    pet_map = {
+        (row.pet_type, row.pet_name, row.breed): row.pet_key
+        for row in pet_df.select("pet_key", "pet_type", "pet_name", "breed").collect()
+    }
     return pet_map
 
 
 def insert_dim_customer(spark, df, country_map, pet_map):
-    customers = df.select(
-        "id",
-        "customer_first_name",
-        "customer_last_name",
-        "customer_age",
-        "customer_email",
-        "customer_postal_code",
-        "customer_country",
-        "customer_pet_type",
-        "customer_pet_name",
-        "customer_pet_breed",
-    ).distinct()
-
-    customers = customers.collect()
-
-    conn = get_postgres_connection()
-    cursor = conn.cursor()
-
-    customer_map = {}
-    for row in customers:
-        source_id = row.id
-        first_name = row.customer_first_name
-        last_name = row.customer_last_name
-        age = row.customer_age
-        email = row.customer_email
-        postal_code = row.customer_postal_code
-        country_name = row.customer_country
-        pet_type = row.customer_pet_type
-        pet_name = row.customer_pet_name
-        breed = row.customer_pet_breed
-
-        country_key = country_map.get(country_name)
-        pet_key = pet_map.get((pet_type, pet_name, breed))
-
-        cursor.execute(
-            """
-            INSERT INTO dim_customer (source_id, first_name, last_name, age, email, postal_code, country_key, pet_key)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-            ON CONFLICT (source_id) DO UPDATE SET first_name = EXCLUDED.first_name
-            RETURNING customer_key, source_id
-        """,
-            (
-                source_id,
-                first_name,
-                last_name,
-                age,
-                email,
-                postal_code,
-                country_key,
-                pet_key,
-            ),
+    customers = (
+        df.select(
+            "id",
+            "customer_first_name",
+            "customer_last_name",
+            "customer_age",
+            "customer_email",
+            "customer_postal_code",
         )
-        result = cursor.fetchone()
-        if result:
-            customer_map[result[1]] = result[0]
+        .groupBy("id")
+        .agg(
+            first("customer_first_name").alias("customer_first_name"),
+            first("customer_last_name").alias("customer_last_name"),
+            first("customer_age").alias("customer_age"),
+            first("customer_email").alias("customer_email"),
+            first("customer_postal_code").alias("customer_postal_code"),
+        )
+    )
 
-    conn.commit()
-    cursor.close()
-    conn.close()
+    customers_df = (
+        customers.withColumnRenamed("id", "source_id")
+        .withColumnRenamed("customer_first_name", "first_name")
+        .withColumnRenamed("customer_last_name", "last_name")
+        .withColumnRenamed("customer_age", "age")
+        .withColumnRenamed("customer_email", "email")
+        .withColumnRenamed("customer_postal_code", "postal_code")
+    )
+
+    write_df_to_postgres(customers_df, "dim_customer", mode="append")
+
+    customer_df = (
+        spark.read.format("jdbc")
+        .option("url", jdbc_url)
+        .option("dbtable", "dim_customer")
+        .option("user", "lab")
+        .option("password", "lab123")
+        .option("driver", "org.postgresql.Driver")
+        .load()
+    )
+
+    customer_map = {
+        row.source_id: row.customer_key
+        for row in customer_df.select("customer_key", "source_id").collect()
+    }
     return customer_map
 
 
 def insert_dim_seller(spark, df, country_map):
-    sellers = df.select(
-        "sale_seller_id",
-        "seller_first_name",
-        "seller_last_name",
-        "seller_email",
-        "seller_postal_code",
-        "seller_country",
-    ).distinct()
-
-    sellers = sellers.collect()
-
-    conn = get_postgres_connection()
-    cursor = conn.cursor()
-
-    seller_map = {}
-    for row in sellers:
-        source_id = row.sale_seller_id
-        first_name = row.seller_first_name
-        last_name = row.seller_last_name
-        email = row.seller_email
-        postal_code = row.seller_postal_code
-        country_name = row.seller_country
-
-        country_key = country_map.get(country_name)
-
-        cursor.execute(
-            """
-            INSERT INTO dim_seller (source_id, first_name, last_name, email, postal_code, country_key)
-            VALUES (%s, %s, %s, %s, %s, %s)
-            ON CONFLICT (source_id) DO UPDATE SET first_name = EXCLUDED.first_name
-            RETURNING seller_key, source_id
-        """,
-            (source_id, first_name, last_name, email, postal_code, country_key),
+    sellers = (
+        df.select(
+            "sale_seller_id",
+            "seller_first_name",
+            "seller_last_name",
+            "seller_email",
+            "seller_postal_code",
         )
-        result = cursor.fetchone()
-        if result:
-            seller_map[result[1]] = result[0]
+        .groupBy("sale_seller_id")
+        .agg(
+            first("seller_first_name").alias("seller_first_name"),
+            first("seller_last_name").alias("seller_last_name"),
+            first("seller_email").alias("seller_email"),
+            first("seller_postal_code").alias("seller_postal_code"),
+        )
+    )
 
-    conn.commit()
-    cursor.close()
-    conn.close()
+    sellers_df = (
+        sellers.withColumnRenamed("sale_seller_id", "source_id")
+        .withColumnRenamed("seller_first_name", "first_name")
+        .withColumnRenamed("seller_last_name", "last_name")
+        .withColumnRenamed("seller_email", "email")
+        .withColumnRenamed("seller_postal_code", "postal_code")
+    )
+
+    write_df_to_postgres(sellers_df, "dim_seller", mode="append")
+
+    seller_df = (
+        spark.read.format("jdbc")
+        .option("url", jdbc_url)
+        .option("dbtable", "dim_seller")
+        .option("user", "lab")
+        .option("password", "lab123")
+        .option("driver", "org.postgresql.Driver")
+        .load()
+    )
+
+    seller_map = {
+        row.source_id: row.seller_key
+        for row in seller_df.select("seller_key", "source_id").collect()
+    }
     return seller_map
 
 
 def insert_dim_product_category(spark, df):
     categories = (
-        df.select("product_category").distinct().na.drop(subset=["product_category"])
+        (df.select("product_category").distinct().na.drop(subset=["product_category"]))
+        .distinct()
+        .withColumnRenamed("product_category", "category_name")
     )
-    categories = categories.distinct().collect()
 
-    conn = get_postgres_connection()
-    cursor = conn.cursor()
+    write_df_to_postgres(categories, "dim_product_category", mode="append")
 
-    cat_map = {}
-    for row in categories:
-        category_name = row.product_category
-        if category_name:
-            cursor.execute(
-                "INSERT INTO dim_product_category (category_name) VALUES (%s) ON CONFLICT (category_name) DO NOTHING RETURNING category_key, category_name",
-                (category_name,),
-            )
-            result = cursor.fetchone()
-            if result:
-                cat_map[category_name] = result[0]
+    cat_df = (
+        spark.read.format("jdbc")
+        .option("url", jdbc_url)
+        .option("dbtable", "dim_product_category")
+        .option("user", "lab")
+        .option("password", "lab123")
+        .option("driver", "org.postgresql.Driver")
+        .load()
+    )
 
-    conn.commit()
-    cursor.close()
-    conn.close()
+    cat_map = {
+        row.category_name: row.category_key
+        for row in cat_df.select("category_key", "category_name").collect()
+    }
     return cat_map
 
 
 def insert_dim_product_brand(spark, df):
-    brands = df.select("product_brand").distinct().na.drop(subset=["product_brand"])
-    brands = brands.distinct().collect()
+    brands = (
+        (df.select("product_brand").distinct().na.drop(subset=["product_brand"]))
+        .distinct()
+        .withColumnRenamed("product_brand", "brand_name")
+    )
 
-    conn = get_postgres_connection()
-    cursor = conn.cursor()
+    write_df_to_postgres(brands, "dim_product_brand", mode="append")
 
-    brand_map = {}
-    for row in brands:
-        brand_name = row.product_brand
-        if brand_name:
-            cursor.execute(
-                "INSERT INTO dim_product_brand (brand_name) VALUES (%s) ON CONFLICT (brand_name) DO NOTHING RETURNING brand_key, brand_name",
-                (brand_name,),
-            )
-            result = cursor.fetchone()
-            if result:
-                brand_map[brand_name] = result[0]
+    brand_df = (
+        spark.read.format("jdbc")
+        .option("url", jdbc_url)
+        .option("dbtable", "dim_product_brand")
+        .option("user", "lab")
+        .option("password", "lab123")
+        .option("driver", "org.postgresql.Driver")
+        .load()
+    )
 
-    conn.commit()
-    cursor.close()
-    conn.close()
+    brand_map = {
+        row.brand_name: row.brand_key
+        for row in brand_df.select("brand_key", "brand_name").collect()
+    }
     return brand_map
 
 
 def insert_dim_product(spark, df, cat_map, brand_map):
-    products = df.select(
-        "sale_product_id",
-        "product_name",
-        "product_category",
-        "product_brand",
-        "product_price",
-        "product_weight",
-        "product_color",
-        "product_size",
-        "product_material",
-        "product_description",
-        "product_rating",
-        "product_reviews",
-        "product_release_date",
-        "product_expiry_date",
-    ).distinct()
-
-    products = products.collect()
-
-    conn = get_postgres_connection()
-    cursor = conn.cursor()
-
-    product_map = {}
-    for row in products:
-        source_id = row.sale_product_id
-        product_name = row.product_name
-        category_name = row.product_category
-        brand_name = row.product_brand
-        price = row.product_price
-        weight = row.product_weight
-        color = row.product_color
-        size = row.product_size
-        material = row.product_material
-        description = row.product_description
-        rating = row.product_rating
-        reviews = row.product_reviews
-        release_date = row.product_release_date
-        expiry_date = row.product_expiry_date
-
-        category_key = cat_map.get(category_name)
-        brand_key = brand_map.get(brand_name)
-
-        cursor.execute(
-            """
-            INSERT INTO dim_product (source_id, product_name, category_key, brand_key, price, weight, color, size, material, description, rating, reviews, release_date, expiry_date)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            ON CONFLICT (source_id) DO UPDATE SET product_name = EXCLUDED.product_name
-            RETURNING product_key, source_id
-        """,
-            (
-                source_id,
-                product_name,
-                category_key,
-                brand_key,
-                price,
-                weight,
-                color,
-                size,
-                material,
-                description,
-                rating,
-                reviews,
-                release_date,
-                expiry_date,
-            ),
+    products = (
+        df.select(
+            "sale_product_id",
+            "product_name",
+            "product_category",
+            "product_brand",
+            "product_price",
+            "product_weight",
+            "product_color",
+            "product_size",
+            "product_material",
+            "product_description",
+            "product_rating",
+            "product_reviews",
+            "product_release_date",
+            "product_expiry_date",
         )
-        result = cursor.fetchone()
-        if result:
-            product_map[result[1]] = result[0]
+        .groupBy("sale_product_id")
+        .agg(
+            first("product_name").alias("product_name"),
+            first("product_category").alias("product_category"),
+            first("product_brand").alias("product_brand"),
+            first("product_price").alias("product_price"),
+            first("product_weight").alias("product_weight"),
+            first("product_color").alias("product_color"),
+            first("product_size").alias("product_size"),
+            first("product_material").alias("product_material"),
+            first("product_description").alias("product_description"),
+            first("product_rating").alias("product_rating"),
+            first("product_reviews").alias("product_reviews"),
+            first("product_release_date").alias("product_release_date"),
+            first("product_expiry_date").alias("product_expiry_date"),
+        )
+    )
 
-    conn.commit()
-    cursor.close()
-    conn.close()
+    cat_df = spark.createDataFrame(
+        [(k, v) for k, v in cat_map.items()], ["category_name", "category_key"]
+    )
+    brand_df = spark.createDataFrame(
+        [(k, v) for k, v in brand_map.items()], ["brand_name", "brand_key"]
+    )
+
+    products_with_cat = products.join(
+        cat_df, products.product_category == cat_df.category_name, "left"
+    )
+    products_with_all = products_with_cat.join(
+        brand_df, products_with_cat.product_brand == brand_df.brand_name, "left"
+    )
+
+    products_df = (
+        products_with_all.withColumnRenamed("sale_product_id", "source_id")
+        .withColumnRenamed("product_name", "product_name")
+        .withColumnRenamed("product_price", "price")
+        .withColumnRenamed("product_weight", "weight")
+        .withColumnRenamed("product_color", "color")
+        .withColumnRenamed("product_size", "size")
+        .withColumnRenamed("product_material", "material")
+        .withColumnRenamed("product_description", "description")
+        .withColumnRenamed("product_rating", "rating")
+        .withColumnRenamed("product_reviews", "reviews")
+        .withColumnRenamed("product_release_date", "release_date")
+        .withColumnRenamed("product_expiry_date", "expiry_date")
+    )[
+        [
+            "source_id",
+            "product_name",
+            "category_key",
+            "brand_key",
+            "price",
+            "weight",
+            "color",
+            "size",
+            "material",
+            "description",
+            "rating",
+            "reviews",
+            "release_date",
+            "expiry_date",
+        ]
+    ]
+
+    write_df_to_postgres(products_df, "dim_product", mode="append")
+
+    product_df = (
+        spark.read.format("jdbc")
+        .option("url", jdbc_url)
+        .option("dbtable", "dim_product")
+        .option("user", "lab")
+        .option("password", "lab123")
+        .option("driver", "org.postgresql.Driver")
+        .load()
+    )
+
+    product_map = {
+        row.source_id: row.product_key
+        for row in product_df.select("product_key", "source_id").collect()
+    }
     return product_map
 
 
 def insert_dim_store(spark, df, country_map):
-    stores = df.select(
-        "store_name",
-        "store_location",
-        "store_city",
-        "store_state",
-        "store_country",
-        "store_phone",
-        "store_email",
-    ).distinct()
+    stores = (
+        df.select(
+            "store_name",
+            "store_location",
+            "store_city",
+            "store_state",
+            "store_phone",
+            "store_email",
+        )
+        .groupBy("store_name")
+        .agg(
+            first("store_location").alias("store_location"),
+            first("store_city").alias("store_city"),
+            first("store_state").alias("store_state"),
+            first("store_phone").alias("store_phone"),
+            first("store_email").alias("store_email"),
+        )
+        .na.drop(subset=["store_name"])
+    )
 
-    stores = stores.collect()
+    stores_df = (
+        stores.withColumnRenamed("store_location", "location")
+        .withColumnRenamed("store_city", "city")
+        .withColumnRenamed("store_state", "state")
+        .withColumnRenamed("store_phone", "phone")
+        .withColumnRenamed("store_email", "email")
+    )
 
-    conn = get_postgres_connection()
-    cursor = conn.cursor()
+    write_df_to_postgres(stores_df, "dim_store", mode="append")
 
-    store_map = {}
-    for row in stores:
-        store_name = row.store_name
-        location = row.store_location
-        city = row.store_city
-        state = row.store_state
-        country_name = row.store_country
-        phone = row.store_phone
-        email = row.store_email
+    store_df = (
+        spark.read.format("jdbc")
+        .option("url", jdbc_url)
+        .option("dbtable", "dim_store")
+        .option("user", "lab")
+        .option("password", "lab123")
+        .option("driver", "org.postgresql.Driver")
+        .load()
+    )
 
-        country_key = country_map.get(country_name)
-
-        if store_name:
-            cursor.execute(
-                """
-                INSERT INTO dim_store (store_name, location, city, state, country_key, phone, email)
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT (store_name) DO UPDATE SET location = EXCLUDED.location
-                RETURNING store_key, store_name
-            """,
-                (store_name, location, city, state, country_key, phone, email),
-            )
-            result = cursor.fetchone()
-            if result:
-                store_map[result[1]] = result[0]
-
-    conn.commit()
-    cursor.close()
-    conn.close()
+    store_map = {
+        row.store_name: row.store_key
+        for row in store_df.select("store_key", "store_name").collect()
+    }
     return store_map
 
 
 def insert_dim_supplier(spark, df, country_map):
-    suppliers = df.select(
-        "supplier_name",
-        "supplier_contact",
-        "supplier_email",
-        "supplier_phone",
-        "supplier_address",
-        "supplier_city",
-        "supplier_country",
-    ).distinct()
+    suppliers = (
+        df.select(
+            "supplier_name",
+            "supplier_contact",
+            "supplier_email",
+            "supplier_phone",
+            "supplier_address",
+            "supplier_city",
+        )
+        .groupBy("supplier_name")
+        .agg(
+            first("supplier_contact").alias("supplier_contact"),
+            first("supplier_email").alias("supplier_email"),
+            first("supplier_phone").alias("supplier_phone"),
+            first("supplier_address").alias("supplier_address"),
+            first("supplier_city").alias("supplier_city"),
+        )
+        .na.drop(subset=["supplier_name"])
+    )
 
-    suppliers = suppliers.collect()
+    suppliers_df = (
+        suppliers.withColumnRenamed("supplier_contact", "contact")
+        .withColumnRenamed("supplier_email", "email")
+        .withColumnRenamed("supplier_phone", "phone")
+        .withColumnRenamed("supplier_address", "address")
+        .withColumnRenamed("supplier_city", "city")
+    )
 
-    conn = get_postgres_connection()
-    cursor = conn.cursor()
+    write_df_to_postgres(suppliers_df, "dim_supplier", mode="append")
 
-    supplier_map = {}
-    for row in suppliers:
-        supplier_name = row.supplier_name
-        contact = row.supplier_contact
-        email = row.supplier_email
-        phone = row.supplier_phone
-        address = row.supplier_address
-        city = row.supplier_city
-        country_name = row.supplier_country
+    supplier_df = (
+        spark.read.format("jdbc")
+        .option("url", jdbc_url)
+        .option("dbtable", "dim_supplier")
+        .option("user", "lab")
+        .option("password", "lab123")
+        .option("driver", "org.postgresql.Driver")
+        .load()
+    )
 
-        country_key = country_map.get(country_name)
-
-        if supplier_name:
-            cursor.execute(
-                """
-                INSERT INTO dim_supplier (supplier_name, contact, email, phone, address, city, country_key)
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT (supplier_name) DO UPDATE SET contact = EXCLUDED.contact
-                RETURNING supplier_key, supplier_name
-            """,
-                (supplier_name, contact, email, phone, address, city, country_key),
-            )
-
-            result = cursor.fetchone()
-            if result:
-                supplier_map[result[1]] = result[0]
-
-    conn.commit()
-    cursor.close()
-    conn.close()
+    supplier_map = {
+        row.supplier_name: row.supplier_key
+        for row in supplier_df.select("supplier_key", "supplier_name").collect()
+    }
     return supplier_map
 
 
 def insert_dim_date(spark, df):
     dates = df.select("sale_date").distinct().na.drop(subset=["sale_date"])
-    dates = dates.collect()
 
-    conn = get_postgres_connection()
-    cursor = conn.cursor()
+    from datetime import datetime
+    from pyspark.sql.functions import udf
+    from pyspark.sql.types import ArrayType, StringType
 
-    for row in dates:
-        sale_date = row.sale_date
+    def parse_date(date_str):
         try:
-            parsed_date = sale_date
-            if "/" in sale_date:
-                parts = sale_date.split("/")
+            if "/" in str(date_str):
+                parts = str(date_str).split("/")
                 if len(parts) == 3:
-                    parsed_date = f"{parts[2]}-{parts[0].zfill(2)}-{parts[1].zfill(2)}"
+                    parsed = f"{parts[2]}-{parts[0].zfill(2)}-{parts[1].zfill(2)}"
+                else:
+                    parsed = date_str
+            else:
+                parsed = date_str
 
-            from datetime import datetime
-
-            dt = datetime.strptime(parsed_date, "%Y-%m-%d")
-            date_key = int(dt.strftime("%Y%m%d"))
-            day = dt.day
-            month = dt.month
-            year = dt.year
-            quarter = (month - 1) // 3 + 1
-            day_of_week = dt.weekday()
-            day_name = dt.strftime("%A")
-            month_name = dt.strftime("%B")
-            is_weekend = day_of_week >= 5
-
-            cursor.execute(
-                """
-                INSERT INTO dim_date (date_key, full_date, day, month, year, quarter, day_of_week, day_name, month_name, is_weekend)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT (date_key) DO NOTHING
-            """,
-                (
-                    date_key,
-                    parsed_date,
-                    day,
-                    month,
-                    year,
-                    quarter,
-                    day_of_week,
-                    day_name,
-                    month_name,
-                    is_weekend,
-                ),
-            )
+            dt = datetime.strptime(parsed, "%Y-%m-%d")
+            return [
+                str(int(dt.strftime("%Y%m%d"))),
+                parsed,
+                str(dt.day),
+                str(dt.month),
+                str(dt.year),
+                str((dt.month - 1) // 3 + 1),
+                str(dt.weekday()),
+                dt.strftime("%A"),
+                dt.strftime("%B"),
+                str(dt.weekday() >= 5),
+            ]
         except:
-            pass
+            return None
 
-    conn.commit()
-    cursor.close()
-    conn.close()
+    parse_date_udf = udf(parse_date, ArrayType(StringType()))
+
+    dates_parsed = dates.withColumn("parsed", parse_date_udf(col("sale_date")))
+
+    dates_df = dates_parsed.select(
+        col("parsed")[0].cast("int").alias("date_key"),
+        col("parsed")[1].alias("full_date"),
+        col("parsed")[2].cast("int").alias("day"),
+        col("parsed")[3].cast("int").alias("month"),
+        col("parsed")[4].cast("int").alias("year"),
+        col("parsed")[5].cast("int").alias("quarter"),
+        col("parsed")[6].cast("int").alias("day_of_week"),
+        col("parsed")[7].alias("day_name"),
+        col("parsed")[8].alias("month_name"),
+        col("parsed")[9].cast("Boolean").alias("is_weekend"),
+    ).filter(col("date_key").isNotNull())
+
+    write_df_to_postgres(dates_df, "dim_date", mode="append")
 
 
 def insert_fact_sales(
     spark, df, customer_map, seller_map, product_map, store_map, supplier_map
 ):
-    conn = get_postgres_connection()
-    cursor = conn.cursor()
+    customer_df = (
+        spark.read.format("jdbc")
+        .option("url", jdbc_url)
+        .option("dbtable", "dim_customer")
+        .option("user", "lab")
+        .option("password", "lab123")
+        .option("driver", "org.postgresql.Driver")
+        .load()
+    )
 
-    cursor.execute("SELECT date_key, full_date FROM dim_date")
-    date_map = {str(row[1]): row[0] for row in cursor.fetchall()}
+    seller_df = (
+        spark.read.format("jdbc")
+        .option("url", jdbc_url)
+        .option("dbtable", "dim_seller")
+        .option("user", "lab")
+        .option("password", "lab123")
+        .option("driver", "org.postgresql.Driver")
+        .load()
+    )
 
-    sales = df.collect()
-    inserted_count = 0
-    error_count = 0
+    product_df = (
+        spark.read.format("jdbc")
+        .option("url", jdbc_url)
+        .option("dbtable", "dim_product")
+        .option("user", "lab")
+        .option("password", "lab123")
+        .option("driver", "org.postgresql.Driver")
+        .load()
+    )
 
-    for row in sales:
-        source_id = row.id
-        sale_date = row.sale_date
-        customer_id = row.id  # use id, not sale_customer_id
-        seller_id = row.sale_seller_id
-        product_id = row.sale_product_id
-        store_name = row.store_name
-        supplier_name = row.supplier_name
-        quantity = row.sale_quantity
-        unit_price = row.product_price
-        total_price = row.sale_total_price
+    store_df = (
+        spark.read.format("jdbc")
+        .option("url", jdbc_url)
+        .option("dbtable", "dim_store")
+        .option("user", "lab")
+        .option("password", "lab123")
+        .option("driver", "org.postgresql.Driver")
+        .load()
+    )
+
+    supplier_df = (
+        spark.read.format("jdbc")
+        .option("url", jdbc_url)
+        .option("dbtable", "dim_supplier")
+        .option("user", "lab")
+        .option("password", "lab123")
+        .option("driver", "org.postgresql.Driver")
+        .load()
+    )
+
+    date_df = (
+        spark.read.format("jdbc")
+        .option("url", jdbc_url)
+        .option("dbtable", "dim_date")
+        .option("user", "lab")
+        .option("password", "lab123")
+        .option("driver", "org.postgresql.Driver")
+        .load()
+    )
+
+    def parse_date_udf(date_str):
+        from datetime import datetime
 
         try:
-            parsed_date = sale_date
-            if sale_date and "/" in str(sale_date):
-                parts = str(sale_date).split("/")
+            if "/" in str(date_str):
+                parts = str(date_str).split("/")
                 if len(parts) == 3:
-                    parsed_date = f"{parts[2]}-{parts[0].zfill(2)}-{parts[1].zfill(2)}"
+                    return f"{parts[2]}-{parts[0].zfill(2)}-{parts[1].zfill(2)}"
+            return str(date_str)
+        except:
+            return None
 
-            date_key = date_map.get(parsed_date)
-            customer_key = customer_map.get(customer_id)
-            seller_key = seller_map.get(seller_id)
-            product_key = product_map.get(product_id)
-            store_key = store_map.get(store_name)
-            supplier_key = supplier_map.get(supplier_name)
+    from pyspark.sql.functions import udf
+    from pyspark.sql.types import StringType
 
-            if date_key and customer_key and seller_key and product_key and store_key:
-                cursor.execute(
-                    """
-                    INSERT INTO fact_sales (source_id, date_key, customer_key, seller_key, product_key, store_key, supplier_key, quantity, unit_price, total_price, sale_date_original)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                """,
-                    (
-                        source_id,
-                        date_key,
-                        customer_key,
-                        seller_key,
-                        product_key,
-                        store_key,
-                        supplier_key,
-                        quantity,
-                        unit_price,
-                        total_price,
-                        parsed_date,
-                    ),
-                )
-                inserted_count += 1
-            else:
-                error_count += 1
-                if error_count <= 5:
-                    print(
-                        f"Missing keys for sale {source_id}: date={date_key}, customer={customer_key}, seller={seller_id}, product={product_id}, store={store_name}, supplier={supplier_name}"
-                    )
-        except Exception as e:
-            error_count += 1
-            if error_count <= 5:
-                print(f"Error inserting sale {source_id}: {e}")
+    parse_date_str_udf = udf(parse_date_udf, StringType())
 
-    conn.commit()
-    cursor.close()
-    conn.close()
-    print(f"Fact sales: inserted {inserted_count}, errors {error_count}")
+    sales_data = df.select(
+        col("id").alias("source_id"),
+        col("sale_date"),
+        col("sale_quantity").alias("quantity"),
+        col("product_price").alias("unit_price"),
+        col("sale_total_price").alias("total_price"),
+        col("sale_seller_id"),
+        col("sale_product_id"),
+        col("store_name"),
+        col("supplier_name"),
+    ).withColumn("parsed_date", parse_date_str_udf(col("sale_date")))
+
+    sales_with_customer = sales_data.join(
+        customer_df, sales_data.source_id == customer_df.source_id, "inner"
+    ).select(
+        sales_data.source_id,
+        sales_data.parsed_date,
+        sales_data.quantity,
+        sales_data.unit_price,
+        sales_data.total_price,
+        sales_data.sale_seller_id,
+        sales_data.sale_product_id,
+        sales_data.store_name,
+        sales_data.supplier_name,
+        customer_df.customer_key,
+    )
+
+    sales_with_seller = sales_with_customer.join(
+        seller_df, sales_with_customer.sale_seller_id == seller_df.source_id, "inner"
+    ).select(
+        sales_with_customer.source_id,
+        sales_with_customer.parsed_date,
+        sales_with_customer.quantity,
+        sales_with_customer.unit_price,
+        sales_with_customer.total_price,
+        sales_with_customer.sale_product_id,
+        sales_with_customer.store_name,
+        sales_with_customer.supplier_name,
+        sales_with_customer.customer_key,
+        seller_df.seller_key,
+    )
+
+    sales_with_product = sales_with_seller.join(
+        product_df, sales_with_seller.sale_product_id == product_df.source_id, "inner"
+    ).select(
+        sales_with_seller.source_id,
+        sales_with_seller.parsed_date,
+        sales_with_seller.quantity,
+        sales_with_seller.unit_price,
+        sales_with_seller.total_price,
+        sales_with_seller.store_name,
+        sales_with_seller.supplier_name,
+        sales_with_seller.customer_key,
+        sales_with_seller.seller_key,
+        product_df.product_key,
+    )
+
+    sales_with_store = sales_with_product.join(
+        store_df, sales_with_product.store_name == store_df.store_name, "inner"
+    ).select(
+        sales_with_product.source_id,
+        sales_with_product.parsed_date,
+        sales_with_product.quantity,
+        sales_with_product.unit_price,
+        sales_with_product.total_price,
+        sales_with_product.supplier_name,
+        sales_with_product.customer_key,
+        sales_with_product.seller_key,
+        sales_with_product.product_key,
+        store_df.store_key,
+    )
+
+    sales_with_supplier = sales_with_store.join(
+        supplier_df,
+        sales_with_store.supplier_name == supplier_df.supplier_name,
+        "inner",
+    ).select(
+        sales_with_store.source_id,
+        sales_with_store.parsed_date,
+        sales_with_store.quantity,
+        sales_with_store.unit_price,
+        sales_with_store.total_price,
+        sales_with_store.customer_key,
+        sales_with_store.seller_key,
+        sales_with_store.product_key,
+        sales_with_store.store_key,
+        supplier_df.supplier_key,
+    )
+
+    sales_with_date = sales_with_supplier.join(
+        date_df, sales_with_supplier.parsed_date == date_df.full_date, "inner"
+    ).select(
+        sales_with_supplier.source_id,
+        date_df.date_key,
+        sales_with_supplier.customer_key,
+        sales_with_supplier.seller_key,
+        sales_with_supplier.product_key,
+        sales_with_supplier.store_key,
+        sales_with_supplier.supplier_key,
+        sales_with_supplier.quantity,
+        sales_with_supplier.unit_price,
+        sales_with_supplier.total_price,
+    )
+
+    fact_sales_df = sales_with_date.select(
+        col("source_id"),
+        col("date_key"),
+        col("customer_key"),
+        col("seller_key"),
+        col("product_key"),
+        col("store_key"),
+        col("supplier_key"),
+        col("quantity"),
+        col("unit_price"),
+        col("total_price"),
+    )
+
+    write_df_to_postgres(fact_sales_df, "fact_sales", mode="append")
+    print(f"Fact sales inserted: {fact_sales_df.count()} rows")
 
 
 def load_to_star_schema(spark):
-    print("Loading data from PostgreSQL...")
+    print("Step 1: Creating tables via Spark...")
+    create_tables(spark)
+
+    print("Step 2: Loading CSV data via Spark...")
+    load_mock_data(spark)
+
+    print("Step 3: Loading data from PostgreSQL...")
     df = (
         spark.read.format("jdbc")
-        .option("url", "jdbc:postgresql://postgres:5432/petstore_analytics")
+        .option("url", jdbc_url)
         .option("dbtable", "mock_data")
         .option("user", "lab")
         .option("password", "lab123")
@@ -610,43 +999,40 @@ def load_to_star_schema(spark):
         .load()
     )
 
-    print("Creating star schema tables...")
-    create_star_schema_tables()
-
-    print("Inserting dimension: country")
+    print("Step 4: Inserting dimension: country")
     country_map = insert_dim_country(spark, df)
 
-    print("Inserting dimension: pet_category")
+    print("Step 5: Inserting dimension: pet_category")
     pet_cat_map = insert_dim_pet_category(spark, df)
 
-    print("Inserting dimension: pet")
+    print("Step 6: Inserting dimension: pet")
     pet_map = insert_dim_pet(spark, df, pet_cat_map)
 
-    print("Inserting dimension: customer")
+    print("Step 7: Inserting dimension: customer")
     customer_map = insert_dim_customer(spark, df, country_map, pet_map)
 
-    print("Inserting dimension: seller")
+    print("Step 8: Inserting dimension: seller")
     seller_map = insert_dim_seller(spark, df, country_map)
 
-    print("Inserting dimension: product_category")
+    print("Step 9: Inserting dimension: product_category")
     cat_map = insert_dim_product_category(spark, df)
 
-    print("Inserting dimension: product_brand")
+    print("Step 10: Inserting dimension: product_brand")
     brand_map = insert_dim_product_brand(spark, df)
 
-    print("Inserting dimension: product")
+    print("Step 11: Inserting dimension: product")
     product_map = insert_dim_product(spark, df, cat_map, brand_map)
 
-    print("Inserting dimension: store")
+    print("Step 12: Inserting dimension: store")
     store_map = insert_dim_store(spark, df, country_map)
 
-    print("Inserting dimension: supplier")
+    print("Step 13: Inserting dimension: supplier")
     supplier_map = insert_dim_supplier(spark, df, country_map)
 
-    print("Inserting dimension: date")
+    print("Step 14: Inserting dimension: date")
     insert_dim_date(spark, df)
 
-    print("Inserting fact: sales")
+    print("Step 15: Inserting fact: sales")
     insert_fact_sales(
         spark, df, customer_map, seller_map, product_map, store_map, supplier_map
     )
@@ -743,36 +1129,130 @@ def create_clickhouse_tables():
 def generate_reports(spark):
     print("Generating reports in ClickHouse...")
 
-    conn = get_postgres_connection()
-    cursor = conn.cursor()
-
     import clickhouse_connect
 
     client = clickhouse_connect.get_client(
         host="clickhouse", port=8123, username="default", password=""
     )
 
-    cursor.execute("""
-        SELECT 
-            p.product_name,
-            pc.category_name,
-            pb.brand_name,
-            SUM(fs.total_price) as total_revenue,
-            SUM(fs.quantity) as total_quantity,
-            AVG(p.rating) as avg_rating,
-            MAX(p.reviews) as review_count
-        FROM fact_sales fs
-        JOIN dim_product p ON fs.product_key = p.product_key
-        JOIN dim_product_category pc ON p.category_key = pc.category_key
-        JOIN dim_product_brand pb ON p.brand_key = pb.brand_key
-        GROUP BY p.product_name, pc.category_name, pb.brand_name
-        ORDER BY total_quantity DESC
-        LIMIT 10
-    """)
+    fact_sales_df = (
+        spark.read.format("jdbc")
+        .option("url", jdbc_url)
+        .option("dbtable", "fact_sales")
+        .option("user", "lab")
+        .option("password", "lab123")
+        .option("driver", "org.postgresql.Driver")
+        .load()
+    )
 
-    product_data = cursor.fetchall()
+    dim_product_df = (
+        spark.read.format("jdbc")
+        .option("url", jdbc_url)
+        .option("dbtable", "dim_product")
+        .option("user", "lab")
+        .option("password", "lab123")
+        .option("driver", "org.postgresql.Driver")
+        .load()
+    )
+
+    dim_product_category_df = (
+        spark.read.format("jdbc")
+        .option("url", jdbc_url)
+        .option("dbtable", "dim_product_category")
+        .option("user", "lab")
+        .option("password", "lab123")
+        .option("driver", "org.postgresql.Driver")
+        .load()
+    )
+
+    dim_product_brand_df = (
+        spark.read.format("jdbc")
+        .option("url", jdbc_url)
+        .option("dbtable", "dim_product_brand")
+        .option("user", "lab")
+        .option("password", "lab123")
+        .option("driver", "org.postgresql.Driver")
+        .load()
+    )
+
+    dim_customer_df = (
+        spark.read.format("jdbc")
+        .option("url", jdbc_url)
+        .option("dbtable", "dim_customer")
+        .option("user", "lab")
+        .option("password", "lab123")
+        .option("driver", "org.postgresql.Driver")
+        .load()
+    )
+
+    dim_country_df = (
+        spark.read.format("jdbc")
+        .option("url", jdbc_url)
+        .option("dbtable", "dim_country")
+        .option("user", "lab")
+        .option("password", "lab123")
+        .option("driver", "org.postgresql.Driver")
+        .load()
+    )
+
+    dim_date_df = (
+        spark.read.format("jdbc")
+        .option("url", jdbc_url)
+        .option("dbtable", "dim_date")
+        .option("user", "lab")
+        .option("password", "lab123")
+        .option("driver", "org.postgresql.Driver")
+        .load()
+    )
+
+    dim_store_df = (
+        spark.read.format("jdbc")
+        .option("url", jdbc_url)
+        .option("dbtable", "dim_store")
+        .option("user", "lab")
+        .option("password", "lab123")
+        .option("driver", "org.postgresql.Driver")
+        .load()
+    )
+
+    dim_supplier_df = (
+        spark.read.format("jdbc")
+        .option("url", jdbc_url)
+        .option("dbtable", "dim_supplier")
+        .option("user", "lab")
+        .option("password", "lab123")
+        .option("driver", "org.postgresql.Driver")
+        .load()
+    )
+
     client.command("TRUNCATE TABLE analytics.sales_by_product")
-
+    sales_by_product = (
+        fact_sales_df.join(
+            dim_product_df, fact_sales_df.product_key == dim_product_df.product_key
+        )
+        .join(
+            dim_product_category_df,
+            dim_product_df.category_key == dim_product_category_df.category_key,
+        )
+        .join(
+            dim_product_brand_df,
+            dim_product_df.brand_key == dim_product_brand_df.brand_key,
+        )
+        .groupBy(
+            dim_product_df.product_name,
+            dim_product_category_df.category_name,
+            dim_product_brand_df.brand_name,
+        )
+        .agg(
+            sum(fact_sales_df.total_price).alias("total_revenue"),
+            sum(fact_sales_df.quantity).alias("total_quantity"),
+            avg(dim_product_df.rating).alias("avg_rating"),
+            max(dim_product_df.reviews).alias("review_count"),
+        )
+        .orderBy(desc("total_quantity"))
+        .limit(10)
+    )
+    product_data = sales_by_product.collect()
     for row in product_data:
         values = ",".join(
             [
@@ -786,26 +1266,27 @@ def generate_reports(spark):
             f"INSERT INTO analytics.sales_by_product (product_name, category_name, brand_name, total_revenue, total_quantity, avg_rating, review_count) VALUES ({values})"
         )
 
-    cursor.execute("""
-        SELECT 
-            c.customer_key,
-            c.first_name,
-            c.last_name,
-            co.country_name,
-            SUM(fs.total_price) as total_purchases,
-            AVG(fs.total_price) as avg_order_value,
-            COUNT(*) as order_count
-        FROM fact_sales fs
-        JOIN dim_customer c ON fs.customer_key = c.customer_key
-        JOIN dim_country co ON c.country_key = co.country_key
-        GROUP BY c.customer_key, c.first_name, c.last_name, co.country_name
-        ORDER BY total_purchases DESC
-        LIMIT 10
-    """)
-
-    customer_data = cursor.fetchall()
     client.command("TRUNCATE TABLE analytics.sales_by_customer")
-
+    sales_by_customer = (
+        fact_sales_df.join(
+            dim_customer_df, fact_sales_df.customer_key == dim_customer_df.customer_key
+        )
+        .join(dim_country_df, dim_customer_df.country_key == dim_country_df.country_key)
+        .groupBy(
+            dim_customer_df.customer_key,
+            dim_customer_df.first_name,
+            dim_customer_df.last_name,
+            dim_country_df.country_name,
+        )
+        .agg(
+            sum(fact_sales_df.total_price).alias("total_purchases"),
+            avg(fact_sales_df.total_price).alias("avg_order_value"),
+            count(fact_sales_df.sale_key).alias("order_count"),
+        )
+        .orderBy(desc("total_purchases"))
+        .limit(10)
+    )
+    customer_data = sales_by_customer.collect()
     for row in customer_data:
         values = ",".join(
             [
@@ -819,23 +1300,23 @@ def generate_reports(spark):
             f"INSERT INTO analytics.sales_by_customer (customer_key, first_name, last_name, country_name, total_purchases, avg_order_value, order_count) VALUES ({values})"
         )
 
-    cursor.execute("""
-        SELECT 
-            d.month_name || ' ' || d.year as year_month,
-            d.year,
-            d.month,
-            SUM(fs.total_price) as total_revenue,
-            COUNT(*) as order_count,
-            AVG(fs.total_price) as avg_order_value
-        FROM fact_sales fs
-        JOIN dim_date d ON fs.date_key = d.date_key
-        GROUP BY d.year, d.month, d.month_name
-        ORDER BY d.year, d.month
-    """)
-
-    time_data = cursor.fetchall()
     client.command("TRUNCATE TABLE analytics.sales_by_time")
-
+    sales_by_time = (
+        fact_sales_df.join(dim_date_df, fact_sales_df.date_key == dim_date_df.date_key)
+        .groupBy(dim_date_df.month_name, dim_date_df.year, dim_date_df.month)
+        .agg(
+            sum(fact_sales_df.total_price).alias("total_revenue"),
+            count(fact_sales_df.sale_key).alias("order_count"),
+            avg(fact_sales_df.total_price).alias("avg_order_value"),
+        )
+        .withColumn(
+            "year_month", concat(dim_date_df.month_name, lit(" "), dim_date_df.year)
+        )
+        .orderBy(dim_date_df.year, dim_date_df.month)
+    )
+    time_data = sales_by_time.select(
+        "year_month", "year", "month", "total_revenue", "order_count", "avg_order_value"
+    ).collect()
     for row in time_data:
         values = ",".join(
             [
@@ -849,25 +1330,24 @@ def generate_reports(spark):
             f"INSERT INTO analytics.sales_by_time (year_month, year, month, total_revenue, order_count, avg_order_value) VALUES ({values})"
         )
 
-    cursor.execute("""
-        SELECT 
-            s.store_name,
-            s.city,
-            co.country_name,
-            SUM(fs.total_price) as total_revenue,
-            COUNT(*) as order_count,
-            AVG(fs.total_price) as avg_order_value
-        FROM fact_sales fs
-        JOIN dim_store s ON fs.store_key = s.store_key
-        JOIN dim_country co ON s.country_key = co.country_key
-        GROUP BY s.store_name, s.city, co.country_name
-        ORDER BY total_revenue DESC
-        LIMIT 5
-    """)
-
-    store_data = cursor.fetchall()
     client.command("TRUNCATE TABLE analytics.sales_by_store")
-
+    sales_by_store = (
+        fact_sales_df.join(
+            dim_store_df, fact_sales_df.store_key == dim_store_df.store_key
+        )
+        .join(dim_country_df, dim_store_df.country_key == dim_country_df.country_key)
+        .groupBy(
+            dim_store_df.store_name, dim_store_df.city, dim_country_df.country_name
+        )
+        .agg(
+            sum(fact_sales_df.total_price).alias("total_revenue"),
+            count(fact_sales_df.sale_key).alias("order_count"),
+            avg(fact_sales_df.total_price).alias("avg_order_value"),
+        )
+        .orderBy(desc("total_revenue"))
+        .limit(5)
+    )
+    store_data = sales_by_store.collect()
     for row in store_data:
         values = ",".join(
             [
@@ -881,25 +1361,23 @@ def generate_reports(spark):
             f"INSERT INTO analytics.sales_by_store (store_name, city, country_name, total_revenue, order_count, avg_order_value) VALUES ({values})"
         )
 
-    cursor.execute("""
-        SELECT 
-            sup.supplier_name,
-            co.country_name,
-            SUM(fs.total_price) as total_revenue,
-            COUNT(DISTINCT p.product_key) as product_count,
-            AVG(p.price) as avg_price
-        FROM fact_sales fs
-        JOIN dim_supplier sup ON fs.supplier_key = sup.supplier_key
-        JOIN dim_product p ON fs.product_key = p.product_key
-        JOIN dim_country co ON sup.country_key = co.country_key
-        GROUP BY sup.supplier_name, co.country_name
-        ORDER BY total_revenue DESC
-        LIMIT 5
-    """)
-
-    supplier_data = cursor.fetchall()
     client.command("TRUNCATE TABLE analytics.sales_by_supplier")
-
+    sales_by_supplier = (
+        fact_sales_df.join(
+            dim_supplier_df, fact_sales_df.supplier_key == dim_supplier_df.supplier_key
+        )
+        .join(dim_product_df, fact_sales_df.product_key == dim_product_df.product_key)
+        .join(dim_country_df, dim_supplier_df.country_key == dim_country_df.country_key)
+        .groupBy(dim_supplier_df.supplier_name, dim_country_df.country_name)
+        .agg(
+            sum(fact_sales_df.total_price).alias("total_revenue"),
+            count(dim_product_df.product_key).alias("product_count"),
+            avg(dim_product_df.price).alias("avg_price"),
+        )
+        .orderBy(desc("total_revenue"))
+        .limit(5)
+    )
+    supplier_data = sales_by_supplier.collect()
     for row in supplier_data:
         values = ",".join(
             [
@@ -913,24 +1391,28 @@ def generate_reports(spark):
             f"INSERT INTO analytics.sales_by_supplier (supplier_name, country_name, total_revenue, product_count, avg_price) VALUES ({values})"
         )
 
-    cursor.execute("""
-        SELECT 
-            p.product_name,
-            pc.category_name,
-            p.rating,
-            p.reviews as review_count,
-            SUM(fs.quantity) as total_quantity_sold,
-            SUM(fs.total_price) as total_revenue
-        FROM fact_sales fs
-        JOIN dim_product p ON fs.product_key = p.product_key
-        JOIN dim_product_category pc ON p.category_key = pc.category_key
-        GROUP BY p.product_name, pc.category_name, p.rating, p.reviews
-        ORDER BY p.rating DESC
-    """)
-
-    quality_data = cursor.fetchall()
     client.command("TRUNCATE TABLE analytics.product_quality")
-
+    product_quality = (
+        fact_sales_df.join(
+            dim_product_df, fact_sales_df.product_key == dim_product_df.product_key
+        )
+        .join(
+            dim_product_category_df,
+            dim_product_df.category_key == dim_product_category_df.category_key,
+        )
+        .groupBy(
+            dim_product_df.product_name,
+            dim_product_category_df.category_name,
+            dim_product_df.rating,
+            dim_product_df.reviews,
+        )
+        .agg(
+            sum(fact_sales_df.quantity).alias("total_quantity_sold"),
+            sum(fact_sales_df.total_price).alias("total_revenue"),
+        )
+        .orderBy(desc(dim_product_df.rating))
+    )
+    quality_data = product_quality.collect()
     for row in quality_data:
         values = ",".join(
             [
@@ -945,8 +1427,6 @@ def generate_reports(spark):
         )
 
     client.close()
-    cursor.close()
-    conn.close()
 
     print("Reports generated successfully!")
 
