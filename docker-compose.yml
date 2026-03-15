@@ -64,7 +64,7 @@ services:
       PYSPARK_PYTHON: python3
       PYSPARK_DRIVER_PYTHON: python3
     command: >
-      bash -c "pip install clickhouse-connect==0.6.23 psycopg2-binary &&
+      bash -c "pip install clickhouse-connect==0.6.23 psycopg2-binary pandas &&
       /opt/spark/bin/spark-submit --conf spark.driver.extraJavaOptions='-Dlog4j.logger.org.apache.spark=ERROR -Dlog4j.logger.org.spark_project=ERROR -Dlog4j.logger.org.apache.hadoop=ERROR' 
       --conf spark.executor.extraJavaOptions='-Dlog4j.logger.org.apache.spark=ERROR -Dlog4j.logger.org.spark_project=ERROR -Dlog4j.logger.org.apache.hadoop=ERROR'
       --packages org.postgresql:postgresql:42.6.0,com.clickhouse:clickhouse-jdbc:0.4.6

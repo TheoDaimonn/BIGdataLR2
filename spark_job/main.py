@@ -9,6 +9,13 @@ jdbc_props = {
     "driver": "org.postgresql.Driver",
 }
 
+clickhouse_url = "jdbc:clickhouse://clickhouse:8123/analytics"
+clickhouse_props = {
+    "user": "default",
+    "password": "",
+    "driver": "com.clickhouse.jdbc.ClickHouseDriver",
+}
+
 
 def get_postgres_connection():
     import psycopg2
@@ -280,6 +287,29 @@ def write_df_to_postgres(df, table_name, mode="overwrite"):
         mode=mode,
         properties=jdbc_props,
     )
+
+
+def write_df_to_clickhouse(df, table_name, mode="overwrite"):
+    if df is None or df.head(1) == []:
+        print(f"Warning: No data to write to ClickHouse {table_name}")
+        return
+
+    import clickhouse_connect
+
+    client = clickhouse_connect.get_client(
+        host="clickhouse", port=8123, username="default", password=""
+    )
+
+    if mode == "overwrite":
+        client.command(f"TRUNCATE TABLE analytics.{table_name}")
+
+    pandas_df = df.toPandas()
+    pandas_df = pandas_df.fillna(0)
+
+    client.insert_df(f"analytics.{table_name}", pandas_df)
+    print(f"Written to ClickHouse: {table_name} ({len(pandas_df)} rows)")
+
+    client.close()
 
 
 def insert_dim_country(spark, df):
@@ -1054,25 +1084,71 @@ def create_clickhouse_tables():
         product_name String,
         category_name String,
         brand_name String,
-        total_revenue Float64,
-        total_quantity Int64,
-        avg_rating Float64,
-        review_count Int64
+        total_revenue Nullable(Float64),
+        total_quantity Nullable(Int64),
+        avg_rating Nullable(Float64),
+        review_count Nullable(Int64)
     ) ENGINE = MergeTree()
     ORDER BY product_name
     """)
 
     client.command("""
     CREATE TABLE IF NOT EXISTS analytics.sales_by_customer (
-        customer_key Int32,
+        customer_key Nullable(Int32),
         first_name String,
         last_name String,
         country_name String,
-        total_purchases Float64,
-        avg_order_value Float64,
-        order_count Int32
+        total_purchases Nullable(Float64),
+        avg_order_value Nullable(Float64),
+        order_count Nullable(Int32)
     ) ENGINE = MergeTree()
     ORDER BY customer_key
+    """)
+    client.command("""
+    CREATE TABLE IF NOT EXISTS analytics.sales_by_time (
+        year_month String,
+        year Nullable(Int32),
+        month Nullable(Int32),
+        total_revenue Nullable(Float64),
+        order_count Nullable(Int32),
+        avg_order_value Nullable(Float64)
+    ) ENGINE = MergeTree()
+    ORDER BY (year, month)
+    """)
+
+    client.command("""
+    CREATE TABLE IF NOT EXISTS analytics.sales_by_store (
+        store_name String,
+        city String,
+        country_name String,
+        total_revenue Nullable(Float64),
+        order_count Nullable(Int32),
+        avg_order_value Nullable(Float64)
+    ) ENGINE = MergeTree()
+    ORDER BY store_name
+    """)
+
+    client.command("""
+    CREATE TABLE IF NOT EXISTS analytics.sales_by_supplier (
+        supplier_name String,
+        country_name String,
+        total_revenue Nullable(Float64),
+        product_count Nullable(Int32),
+        avg_price Nullable(Float64)
+    ) ENGINE = MergeTree()
+    ORDER BY supplier_name
+    """)
+
+    client.command("""
+    CREATE TABLE IF NOT EXISTS analytics.product_quality (
+        product_name String,
+        category_name String,
+        rating Nullable(Float64),
+        review_count Nullable(Int64),
+        total_quantity_sold Nullable(Int64),
+        total_revenue Nullable(Float64)
+    ) ENGINE = MergeTree()
+    ORDER BY product_name
     """)
 
     client.command("""
@@ -1128,12 +1204,6 @@ def create_clickhouse_tables():
 
 def generate_reports(spark):
     print("Generating reports in ClickHouse...")
-
-    import clickhouse_connect
-
-    client = clickhouse_connect.get_client(
-        host="clickhouse", port=8123, username="default", password=""
-    )
 
     fact_sales_df = (
         spark.read.format("jdbc")
@@ -1225,7 +1295,7 @@ def generate_reports(spark):
         .load()
     )
 
-    client.command("TRUNCATE TABLE analytics.sales_by_product")
+    print("Generating sales_by_product...")
     sales_by_product = (
         fact_sales_df.join(
             dim_product_df, fact_sales_df.product_key == dim_product_df.product_key
@@ -1251,22 +1321,19 @@ def generate_reports(spark):
         )
         .orderBy(desc("total_quantity"))
         .limit(10)
+        .select(
+            dim_product_df.product_name,
+            dim_product_category_df.category_name,
+            dim_product_brand_df.brand_name,
+            col("total_revenue").cast("double"),
+            col("total_quantity").cast("long"),
+            col("avg_rating").cast("double"),
+            col("review_count").cast("long"),
+        )
     )
-    product_data = sales_by_product.collect()
-    for row in product_data:
-        values = ",".join(
-            [
-                f"'{str(v).replace(chr(39), chr(39) + chr(39))}'"
-                if v is not None
-                else "NULL"
-                for v in row
-            ]
-        )
-        client.command(
-            f"INSERT INTO analytics.sales_by_product (product_name, category_name, brand_name, total_revenue, total_quantity, avg_rating, review_count) VALUES ({values})"
-        )
+    write_df_to_clickhouse(sales_by_product, "sales_by_product", mode="overwrite")
 
-    client.command("TRUNCATE TABLE analytics.sales_by_customer")
+    print("Generating sales_by_customer...")
     sales_by_customer = (
         fact_sales_df.join(
             dim_customer_df, fact_sales_df.customer_key == dim_customer_df.customer_key
@@ -1285,22 +1352,19 @@ def generate_reports(spark):
         )
         .orderBy(desc("total_purchases"))
         .limit(10)
+        .select(
+            dim_customer_df.customer_key.cast("int"),
+            dim_customer_df.first_name,
+            dim_customer_df.last_name,
+            dim_country_df.country_name,
+            col("total_purchases").cast("double"),
+            col("avg_order_value").cast("double"),
+            col("order_count").cast("int"),
+        )
     )
-    customer_data = sales_by_customer.collect()
-    for row in customer_data:
-        values = ",".join(
-            [
-                f"'{str(v).replace(chr(39), chr(39) + chr(39))}'"
-                if v is not None
-                else "NULL"
-                for v in row
-            ]
-        )
-        client.command(
-            f"INSERT INTO analytics.sales_by_customer (customer_key, first_name, last_name, country_name, total_purchases, avg_order_value, order_count) VALUES ({values})"
-        )
+    write_df_to_clickhouse(sales_by_customer, "sales_by_customer", mode="overwrite")
 
-    client.command("TRUNCATE TABLE analytics.sales_by_time")
+    print("Generating sales_by_time...")
     sales_by_time = (
         fact_sales_df.join(dim_date_df, fact_sales_df.date_key == dim_date_df.date_key)
         .groupBy(dim_date_df.month_name, dim_date_df.year, dim_date_df.month)
@@ -1310,27 +1374,22 @@ def generate_reports(spark):
             avg(fact_sales_df.total_price).alias("avg_order_value"),
         )
         .withColumn(
-            "year_month", concat(dim_date_df.month_name, lit(" "), dim_date_df.year)
+            "year_month",
+            concat(dim_date_df.month_name, lit(" "), dim_date_df.year.cast("string")),
         )
         .orderBy(dim_date_df.year, dim_date_df.month)
+        .select(
+            col("year_month"),
+            dim_date_df.year.cast("int"),
+            dim_date_df.month.cast("int"),
+            col("total_revenue").cast("double"),
+            col("order_count").cast("int"),
+            col("avg_order_value").cast("double"),
+        )
     )
-    time_data = sales_by_time.select(
-        "year_month", "year", "month", "total_revenue", "order_count", "avg_order_value"
-    ).collect()
-    for row in time_data:
-        values = ",".join(
-            [
-                f"'{str(v).replace(chr(39), chr(39) + chr(39))}'"
-                if v is not None
-                else "NULL"
-                for v in row
-            ]
-        )
-        client.command(
-            f"INSERT INTO analytics.sales_by_time (year_month, year, month, total_revenue, order_count, avg_order_value) VALUES ({values})"
-        )
+    write_df_to_clickhouse(sales_by_time, "sales_by_time", mode="overwrite")
 
-    client.command("TRUNCATE TABLE analytics.sales_by_store")
+    print("Generating sales_by_store...")
     sales_by_store = (
         fact_sales_df.join(
             dim_store_df, fact_sales_df.store_key == dim_store_df.store_key
@@ -1346,22 +1405,18 @@ def generate_reports(spark):
         )
         .orderBy(desc("total_revenue"))
         .limit(5)
+        .select(
+            dim_store_df.store_name,
+            dim_store_df.city,
+            dim_country_df.country_name,
+            col("total_revenue").cast("double"),
+            col("order_count").cast("int"),
+            col("avg_order_value").cast("double"),
+        )
     )
-    store_data = sales_by_store.collect()
-    for row in store_data:
-        values = ",".join(
-            [
-                f"'{str(v).replace(chr(39), chr(39) + chr(39))}'"
-                if v is not None
-                else "NULL"
-                for v in row
-            ]
-        )
-        client.command(
-            f"INSERT INTO analytics.sales_by_store (store_name, city, country_name, total_revenue, order_count, avg_order_value) VALUES ({values})"
-        )
+    write_df_to_clickhouse(sales_by_store, "sales_by_store", mode="overwrite")
 
-    client.command("TRUNCATE TABLE analytics.sales_by_supplier")
+    print("Generating sales_by_supplier...")
     sales_by_supplier = (
         fact_sales_df.join(
             dim_supplier_df, fact_sales_df.supplier_key == dim_supplier_df.supplier_key
@@ -1376,22 +1431,17 @@ def generate_reports(spark):
         )
         .orderBy(desc("total_revenue"))
         .limit(5)
+        .select(
+            dim_supplier_df.supplier_name,
+            dim_country_df.country_name,
+            col("total_revenue").cast("double"),
+            col("product_count").cast("long"),
+            col("avg_price").cast("double"),
+        )
     )
-    supplier_data = sales_by_supplier.collect()
-    for row in supplier_data:
-        values = ",".join(
-            [
-                f"'{str(v).replace(chr(39), chr(39) + chr(39))}'"
-                if v is not None
-                else "NULL"
-                for v in row
-            ]
-        )
-        client.command(
-            f"INSERT INTO analytics.sales_by_supplier (supplier_name, country_name, total_revenue, product_count, avg_price) VALUES ({values})"
-        )
+    write_df_to_clickhouse(sales_by_supplier, "sales_by_supplier", mode="overwrite")
 
-    client.command("TRUNCATE TABLE analytics.product_quality")
+    print("Generating product_quality...")
     product_quality = (
         fact_sales_df.join(
             dim_product_df, fact_sales_df.product_key == dim_product_df.product_key
@@ -1411,22 +1461,16 @@ def generate_reports(spark):
             sum(fact_sales_df.total_price).alias("total_revenue"),
         )
         .orderBy(desc(dim_product_df.rating))
+        .select(
+            dim_product_df.product_name,
+            dim_product_category_df.category_name,
+            dim_product_df.rating.cast("double"),
+            dim_product_df.reviews.cast("long").alias("review_count"),
+            col("total_quantity_sold").cast("long"),
+            col("total_revenue").cast("double"),
+        )
     )
-    quality_data = product_quality.collect()
-    for row in quality_data:
-        values = ",".join(
-            [
-                f"'{str(v).replace(chr(39), chr(39) + chr(39))}'"
-                if v is not None
-                else "NULL"
-                for v in row
-            ]
-        )
-        client.command(
-            f"INSERT INTO analytics.product_quality (product_name, category_name, rating, review_count, total_quantity_sold, total_revenue) VALUES ({values})"
-        )
-
-    client.close()
+    write_df_to_clickhouse(product_quality, "product_quality", mode="overwrite")
 
     print("Reports generated successfully!")
 
